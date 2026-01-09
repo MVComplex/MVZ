@@ -42,7 +42,7 @@ except ImportError:
     DiscordRPC = None
 
 CREATE_NO_WINDOW = 0x08000000
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 ALT11_BAT_CANDIDATES = [
     "general (ALT11).bat",
