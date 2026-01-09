@@ -255,14 +255,24 @@ def get_winws_process():
 
 
 def resource_path(relative_path):
+    """
+    Возвращает абсолютный путь к ресурсу.
+    Работает и в PyInstaller (sys._MEIPASS), и в обычном режиме.
+    """
     try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
+
     return os.path.join(base_path, relative_path)
 
 
 def _app_dir() -> str:
+    """
+    Возвращает папку, где лежит EXE (или main.py).
+    Используется для поиска батников и конфигов рядом с программой.
+    """
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -437,13 +447,20 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        icon_path = resource_path("mvz-round.ico")
-        if os.path.isfile(icon_path):
+        # --- ФИКС ДЛЯ ЛОГОТИПА ---
+        icon_path = None
+        candidates = [
+            resource_path("mvz-round.ico"),
+            os.path.join(_app_dir(), "mvz-round.ico"),
+            os.path.join(os.path.dirname(__file__), "mvz-round.ico")
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                icon_path = p
+                break
+
+        if icon_path:
             self.setWindowIcon(QIcon(icon_path))
-        else:
-            dev_icon = os.path.join(os.path.dirname(__file__), "mvz-round.ico")
-            if os.path.isfile(dev_icon):
-                self.setWindowIcon(QIcon(dev_icon))
 
         self.setWindowTitle("MVZapret (MVZ)")
         self.resize(1200, 750)
@@ -456,7 +473,6 @@ class MainWindow(QMainWindow):
         self.session_start_time: Optional[datetime.datetime] = None
         self.winws_pid: Optional[int] = None
 
-        # Этот процесс используется для хранения ссылки на Popen объект, чтобы читать ошибки
         self.winws_process_obj = None
 
         self.crash_check_timer = QTimer(self)
@@ -498,20 +514,25 @@ class MainWindow(QMainWindow):
         icon_lbl = QLabel()
         icon_lbl.setAlignment(Qt.AlignCenter)
 
-        logo_path = resource_path("mvz_logo.png")
-        if os.path.isfile(logo_path):
-            pix = QPixmap(logo_path)
-            if not pix.isNull():
-                icon_lbl.setPixmap(pix.scaled(200, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # --- ФИКС ДЛЯ ЛОГОТИПА В UI ---
+        logo_file_name = "mvz_logo.png"
+        logo_candidates = [
+            resource_path(logo_file_name),
+            os.path.join(_app_dir(), logo_file_name),
+            os.path.join(os.path.dirname(__file__), "..", logo_file_name)
+        ]
 
-        if icon_lbl.pixmap() is None:
-            dev_logo = os.path.join(os.path.dirname(__file__), "..", "mvz_logo.png")
-            if os.path.isfile(dev_logo):
-                pix = QPixmap(dev_logo)
-                if not pix.isNull():
-                    icon_lbl.setPixmap(pix.scaled(200, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        pix = None
+        for p in logo_candidates:
+            if os.path.isfile(p):
+                temp_pix = QPixmap(p)
+                if not temp_pix.isNull():
+                    pix = temp_pix
+                    break
 
-        if icon_lbl.pixmap() is None:
+        if pix:
+            icon_lbl.setPixmap(pix.scaled(200, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
             icon_lbl.setText("MVZ")
             icon_lbl.setStyleSheet("font-size:28px;color:#60A5FA;font-weight:700;")
 
@@ -608,15 +629,6 @@ class MainWindow(QMainWindow):
         else:
             self.append_log("[Discord RPC] pypresence не установлен")
 
-        if not self.is_autostart_enabled():
-            self.set_autostart_enabled(True)
-
-        if hasattr(self, "auto_run_cb"):
-            autostart = self.is_autostart_enabled()
-            self.auto_run_cb.setEnabled(autostart)
-            if autostart and self.auto_run_cb.isChecked():
-                self.run_alt11_internal()
-
         if PYPRESENCE_AVAILABLE and DiscordRPC and hasattr(self, "discord_rpc_cb"):
             self.discord_rpc_cb.setChecked(True)
             self.on_toggle_discord_rpc(True)
@@ -627,6 +639,29 @@ class MainWindow(QMainWindow):
         self.update_timer.timeout.connect(self.check_updates_silent)
         self.update_timer.start()
         QTimer.singleShot(5_000, self.check_updates_silent)
+
+        # =============================================================
+        # === ФИКС: АВТОЗАПУСК ОБХОДА (ПЕРЕНЕСЕНО В КОНЕЦ INIT) ===
+        # =============================================================
+
+        # 1. Загружаем настройки
+        is_win_autostart = self.is_autostart_enabled()
+        auto_run_bypass = self.settings.value("auto_run_bypass", False, type=bool)
+
+        # 2. Настраиваем чекбокс и привязываем сохранение
+        if hasattr(self, "auto_run_cb"):
+            self.auto_run_cb.blockSignals(True)  # Временно блочим, чтобы не вызвать триггер
+            self.auto_run_cb.setChecked(auto_run_bypass)
+            self.auto_run_cb.setEnabled(is_win_autostart)
+            self.auto_run_cb.blockSignals(False)
+
+            # При клике сохраняем настройку в реестр
+            self.auto_run_cb.toggled.connect(lambda checked: self.settings.setValue("auto_run_bypass", checked))
+
+        # 3. Если включено — запускаем
+        if is_win_autostart and auto_run_bypass:
+            self.append_log("[Autostart] Запуск обхода через 1 сек...")
+            QTimer.singleShot(1000, self.run_alt11_internal)
 
     # ---------- UPDATE LOGIC ----------
     def _version_tuple(self, v: str):
@@ -836,7 +871,8 @@ del "%~f0" >nul
         lay.addWidget(self.autostart_cb)
 
         self.auto_run_cb = QCheckBox("Запускать обход автоматически при старте MVZ")
-        self.auto_run_cb.setChecked(False)
+        # ВАЖНО: не ставим setChecked(False) здесь, чтобы не сбить настройки.
+        # Инициализация происходит в __init__
         lay.addWidget(self.auto_run_cb)
 
         self.discord_rpc_cb = QCheckBox("Discord Rich Presence")
@@ -1275,14 +1311,17 @@ del "%~f0" >nul
     def _autostart_command_and_cwd(self):
         if getattr(sys, "frozen", False):
             exe = sys.executable
-            return f"\"{exe}\"", os.path.dirname(exe)
+            # ВАЖНО: возвращаем путь к EXE и рабочую папку
+            return f'"{exe}"', os.path.dirname(exe)
+
+        # Для разработки
         py_dir = os.path.dirname(sys.executable)
         pythonw = os.path.join(py_dir, "pythonw.exe")
         script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "main.py"))
         if os.path.isfile(pythonw):
-            cmd = f"\"{pythonw}\" \"{script}\""
+            cmd = f'"{pythonw}" "{script}"'
         else:
-            cmd = f"\"C:\\Windows\\py.exe\" \"{script}\""
+            cmd = f'"{sys.executable}" "{script}"'
         return cmd, os.path.dirname(script)
 
     def is_autostart_enabled(self) -> bool:
@@ -1324,7 +1363,9 @@ del "%~f0" >nul
         if hasattr(self, "auto_run_cb"):
             self.auto_run_cb.setEnabled(st)
             if not st:
-                self.auto_run_cb.setChecked(False)
+                # Если автозапуск выключен, то и "запускать батник" не имеет смысла при старте
+                # Но саму галочку можно не снимать, просто она недоступна
+                pass
 
     def on_toggle_autostart(self, checked: bool):
         self.set_autostart_enabled(checked)
