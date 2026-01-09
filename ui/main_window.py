@@ -4,7 +4,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QTextEdit, QLabel, QFrame, QMessageBox, QStackedWidget,
-    QSystemTrayIcon, QMenu, QCheckBox, QApplication, QComboBox
+    QSystemTrayIcon, QMenu, QCheckBox, QApplication, QComboBox,
+    QDialog, QTextBrowser, QProgressDialog
 )
 from PySide6.QtCore import Qt, QProcess, QTimer, QSettings, QUrl
 from PySide6.QtGui import QAction, QPixmap, QIcon, QDesktopServices
@@ -41,7 +42,7 @@ except ImportError:
     DiscordRPC = None
 
 CREATE_NO_WINDOW = 0x08000000
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.0.2"
 
 ALT11_BAT_CANDIDATES = [
     "general (ALT11).bat",
@@ -90,6 +91,7 @@ QComboBox {
 }
 QComboBox:hover { border-color: #3B82F6; }
 QLabel { color: #E2E8F0; }
+QTextBrowser { background: #0F172A; color: #E2E8F0; border: 1px solid #1E293B; border-radius: 8px; }
 """
 
 LIGHT_STYLESHEET = """
@@ -128,6 +130,7 @@ QComboBox {
 }
 QComboBox:hover { border-color: #3B82F6; }
 QLabel { color: #111827; }
+QTextBrowser { background: #FFFFFF; color: #111827; border: 1px solid #D1D5DB; border-radius: 8px; }
 """
 
 PURPLE_STYLESHEET = """
@@ -169,6 +172,7 @@ QComboBox {
 }
 QComboBox:hover { border-color: #7C3AED; }
 QLabel { color: #E5E7EB; }
+QTextBrowser { background: #050816; color: #E5E7EB; border: 1px solid #4C1D95; border-radius: 8px; }
 """
 
 # -------------------- Helpers --------------------
@@ -644,21 +648,16 @@ class MainWindow(QMainWindow):
         # === ФИКС: АВТОЗАПУСК ОБХОДА (ПЕРЕНЕСЕНО В КОНЕЦ INIT) ===
         # =============================================================
 
-        # 1. Загружаем настройки
         is_win_autostart = self.is_autostart_enabled()
         auto_run_bypass = self.settings.value("auto_run_bypass", False, type=bool)
 
-        # 2. Настраиваем чекбокс и привязываем сохранение
         if hasattr(self, "auto_run_cb"):
-            self.auto_run_cb.blockSignals(True)  # Временно блочим, чтобы не вызвать триггер
+            self.auto_run_cb.blockSignals(True)
             self.auto_run_cb.setChecked(auto_run_bypass)
             self.auto_run_cb.setEnabled(is_win_autostart)
             self.auto_run_cb.blockSignals(False)
-
-            # При клике сохраняем настройку в реестр
             self.auto_run_cb.toggled.connect(lambda checked: self.settings.setValue("auto_run_bypass", checked))
 
-        # 3. Если включено — запускаем
         if is_win_autostart and auto_run_bypass:
             self.append_log("[Autostart] Запуск обхода через 1 сек...")
             QTimer.singleShot(1000, self.run_alt11_internal)
@@ -679,86 +678,180 @@ class MainWindow(QMainWindow):
         return tuple(out[:3])
 
     def check_updates_silent(self):
+        """Проверка обновлений в фоне"""
         try:
             req = urllib.request.Request(UPDATE_CHECK_URL, headers={"User-Agent": "MVZ-Updater"})
             with urllib.request.urlopen(req, timeout=10) as r:
                 data = json.loads(r.read().decode("utf-8", errors="replace"))
+
             tag = data.get("tag_name", "").strip()
             if not tag:
                 return
 
+            # Сравниваем версии
             if self._version_tuple(tag) <= self._version_tuple(APP_VERSION):
+                self.append_log(f"[Update] Актуальная версия {APP_VERSION}")
                 return
 
             assets = data.get("assets", [])
             dl_url = None
+            changelog = data.get("body", "Улучшения и исправления")
+
             for a in assets:
                 if a.get("name") == UPDATE_ASSET_NAME:
                     dl_url = a.get("browser_download_url")
                     break
 
             if not dl_url:
+                self.append_log("[Update] Ошибка: нет файла MVZ.exe в релизе")
                 return
 
-            res = QMessageBox.question(
-                self,
-                "Обновление MVZ",
-                f"Вышла новая версия: {tag}\n\nСкачать и обновить?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if res == QMessageBox.Yes:
-                self._download_and_update(dl_url)
+            # Показываем КРАСИВЫЙ диалог обновления
+            self._show_update_dialog(tag, changelog, dl_url)
 
         except urllib.error.HTTPError as e:
-            if e.code == 404:
-                pass  # Молчим если нет релиза
-            else:
-                self.append_log(f"[Update] Ошибка HTTP: {e.code}")
+            if e.code != 404:  # 404 = нет релиза (норм)
+                self.append_log(f"[Update] HTTP ошибка: {e.code}")
         except Exception as e:
             self.append_log(f"[Update] Ошибка проверки: {e}")
 
-    def _download_and_update(self, url: str):
-        self.append_log(f"[Update] Скачивание: {url}")
-        tmp_dir = tempfile.gettempdir()
-        filename = url.split("/")[-1]
-        new_exe = os.path.join(tmp_dir, filename)
+    def _show_update_dialog(self, version: str, changelog: str, url: str):
+        """Красивый диалог обновления"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Обновление MVZ {version}")
+        dialog.setFixedSize(500, 400)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel(f"🎉 Доступна новая версия {version}!")
+        title.setStyleSheet("font-size:18px;font-weight:700;color:#22C55E;")
+        layout.addWidget(title)
+
+        changes_label = QLabel("📝 Что нового:")
+        changes_label.setStyleSheet("font-size:14px;font-weight:600;margin-top:10px;")
+        layout.addWidget(changes_label)
+
+        changelog_box = QTextBrowser()
+        changelog_box.setHtml(changelog.replace("\n", "<br>"))
+        changelog_box.setMaximumHeight(200)
+        layout.addWidget(changelog_box)
+
+        info = QLabel("⚡ Обновление занимает 10-30 секунд\n✅ Все настройки сохранятся")
+        info.setStyleSheet("font-size:12px;color:#94A3B8;margin-top:10px;")
+        layout.addWidget(info)
+
+        btn_layout = QHBoxLayout()
+
+        btn_update = QPushButton("Обновить сейчас")
+        btn_update.setObjectName("Action")
+        btn_update.setStyleSheet("""
+            QPushButton { 
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #22C55E, stop:1 #16A34A);
+                color:#FFF; border:none; border-radius:10px; padding:10px 20px; font-weight:600;
+            }
+            QPushButton:hover { background: #15803D; }
+        """)
+        btn_update.clicked.connect(lambda: self._start_update(url, dialog))
+
+        btn_later = QPushButton("Позже")
+        btn_later.setStyleSheet("""
+            QPushButton { 
+                background:#374151; color:#FFF; border:none; border-radius:10px; padding:10px 20px;
+            }
+            QPushButton:hover { background:#4B5563; }
+        """)
+        btn_later.clicked.connect(dialog.reject)
+
+        btn_layout.addWidget(btn_update)
+        btn_layout.addWidget(btn_later)
+        layout.addLayout(btn_layout)
+
+        dialog.exec()
+
+    def _start_update(self, url: str, dialog):
+        dialog.accept()
+
+        progress = QProgressDialog("Скачивание обновления...", None, 0, 100, self)
+        progress.setWindowTitle("MVZ Update")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "MVZ-Updater"})
-            with urllib.request.urlopen(req, timeout=60) as r, open(new_exe, "wb") as f:
+            self._download_and_update_v2(url, progress)
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "MVZ", f"Ошибка обновления:\n{e}")
+
+    def _download_and_update_v2(self, url: str, progress_dialog):
+        tmp_dir = tempfile.gettempdir()
+        new_exe = os.path.join(tmp_dir, "MVZ_new.exe")
+
+        req = urllib.request.Request(url, headers={"User-Agent": "MVZ-Updater"})
+        with urllib.request.urlopen(req, timeout=60) as response:
+            total = int(response.headers.get('Content-Length', 0))
+            downloaded = 0
+
+            with open(new_exe, 'wb') as f:
                 while True:
-                    chunk = r.read(8192)
+                    chunk = response.read(8192)
                     if not chunk:
                         break
                     f.write(chunk)
-        except Exception as e:
-            QMessageBox.critical(self, "MVZ", f"Ошибка скачивания:\n{e}")
-            return
+                    downloaded += len(chunk)
+
+                    if total > 0:
+                        percent = int((downloaded / total) * 100)
+                        progress_dialog.setValue(percent)
+                        QApplication.processEvents()
+
+        progress_dialog.setValue(100)
+        progress_dialog.setLabelText("Перезапуск...")
 
         if getattr(sys, "frozen", False):
             current_exe = sys.executable
         else:
+            progress_dialog.close()
             return
 
-        updater = os.path.join(tmp_dir, "MVZ_updater.bat")
-        bat = f"""@echo off
+        updater_bat = os.path.join(tmp_dir, "MVZ_update.bat")
+        bat_content = f"""@echo off
 chcp 65001 >nul
-set "CUR={current_exe}"
-set "NEW={new_exe}"
-:wait
-timeout /t 1 /nobreak >nul
-tasklist /fi "imagename eq {os.path.basename(current_exe)}" | find /i "{os.path.basename(current_exe)}" >nul
-if not errorlevel 1 goto wait
-copy /y "%NEW%" "%CUR%" >nul
-start "" "%CUR%"
-del "%NEW%" >nul
+echo Обновление MVZ...
+timeout /t 2 /nobreak >nul
+
+:wait_loop
+tasklist /FI "IMAGENAME eq {os.path.basename(current_exe)}" 2>NUL | find /I "{os.path.basename(current_exe)}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto wait_loop
+)
+
+copy /y "{new_exe}" "{current_exe}" >nul
+if errorlevel 1 (
+    echo ОШИБКА КОПИРОВАНИЯ!
+    pause
+    exit /b 1
+)
+
+start "" "{current_exe}"
+del "{new_exe}" >nul
 del "%~f0" >nul
 """
-        with open(updater, "w", encoding="utf-8", errors="ignore") as f:
-            f.write(bat)
 
-        subprocess.Popen(["cmd", "/c", updater], creationflags=CREATE_NO_WINDOW)
+        with open(updater_bat, 'w', encoding='utf-8') as f:
+            f.write(bat_content)
+
+        subprocess.Popen(
+            ["cmd", "/c", updater_bat],
+            creationflags=CREATE_NO_WINDOW
+        )
+
         self._really_quit = True
+        self.append_log("[Update] Перезапуск для обновления...")
+
+        progress_dialog.close()
         QApplication.quit()
 
     # ---------- Темы ----------
@@ -871,8 +964,6 @@ del "%~f0" >nul
         lay.addWidget(self.autostart_cb)
 
         self.auto_run_cb = QCheckBox("Запускать обход автоматически при старте MVZ")
-        # ВАЖНО: не ставим setChecked(False) здесь, чтобы не сбить настройки.
-        # Инициализация происходит в __init__
         lay.addWidget(self.auto_run_cb)
 
         self.discord_rpc_cb = QCheckBox("Discord Rich Presence")
